@@ -28,6 +28,8 @@ struct Coords {
 
 UID create_uid(EType type, uint8_t x, uint8_t y);
 EType uid_get_type(UID uid);
+uint8_t uid_get_x(UID uid);
+uint8_t uid_get_y(UID uid);
 
 Coords create_coords(double x, double y);
 uint8_t coords_distance(Coords *a, Coords *b);

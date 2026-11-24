@@ -1,3 +1,4 @@
+#include <string.h>
 #include "pinout.h"
 #include "constants.h"
 #include "level.h"
@@ -6,6 +7,8 @@
 #include "entities.h"
 #include "types.h"
 #include "display.h"
+#include "hud.h"
+#include "minimap.h"
 #include "sound.h"
 
 // Useful macros
@@ -14,14 +17,15 @@
 
 // Explicit prototypes (prevents Arduino IDE auto-prototype issues with custom types/defaults)
 void jumpTo(uint8_t target_scene);
+void resetLevelState();
+bool isCellCleared(uint8_t x, uint8_t y);
+void markCellCleared(uint8_t x, uint8_t y);
 void initializeLevel(const uint8_t level[]);
 uint8_t getBlockAt(const uint8_t level[], uint8_t x, uint8_t y);
 bool isSpawned(UID uid);
-bool isStatic(UID uid);
 void spawnEntity(uint8_t type, uint8_t x, uint8_t y);
 void spawnFireball(double x, double y);
-void removeEntity(UID uid, bool makeStatic = false);
-void removeStaticEntity(UID uid);
+void removeEntity(UID uid);
 UID detectCollision(const uint8_t level[], Coords *pos, double relative_x, double relative_y, bool only_walls = false);
 void fire();
 UID updatePosition(const uint8_t level[], Coords *pos, double relative_x, double relative_y, bool only_walls = false);
@@ -31,24 +35,29 @@ void sortEntities();
 Coords translateIntoView(Coords *pos);
 void renderEntities(double view_height);
 void renderGun(uint8_t gun_pos, double amount_jogging);
-void renderHud();
-void updateHud();
-void renderStats();
 void loopIntro();
 void loopGamePlay();
+void loopEndScreen(bool victory);
+void loopGameOver();
+void loopVictory();
 
-// General state
+// General state (FSM)
 uint8_t scene = INTRO;
 bool exit_scene = false;
 bool invert_screen = false;
 uint8_t flash_screen = 0;
 
-// Game entities
+// Game entities and persistence bitmask (64 x 57 / 8 = 456 bytes)
 Player player;
 Entity entity[MAX_ENTITIES];
-StaticEntity static_entity[MAX_STATIC_ENTITIES];
 uint8_t num_entities = 0;
-uint8_t num_static_entities = 0;
+uint8_t cleared_cells[LEVEL_BITMASK_BYTES];
+
+// Match stats & radar toggle
+uint16_t enemies_killed = 0;
+uint32_t game_start_ms = 0;
+uint16_t final_time_sec = 0;
+bool minimap_enabled = false;
 
 void setup(void) {
   setupDisplay();
@@ -60,6 +69,33 @@ void setup(void) {
 void jumpTo(uint8_t target_scene) {
   scene = target_scene;
   exit_scene = true;
+}
+
+// Reset persistence bitmask, active entities and match stats
+void resetLevelState() {
+  memset(cleared_cells, 0, sizeof(cleared_cells));
+  num_entities = 0;
+  enemies_killed = 0;
+  final_time_sec = 0;
+  flash_screen = 0;
+  invert_screen = false;
+  minimap_enabled = false;
+}
+
+bool isCellCleared(uint8_t x, uint8_t y) {
+  if (x >= LEVEL_WIDTH || y >= LEVEL_HEIGHT) {
+    return false;
+  }
+  uint16_t bit_index = (uint16_t)y * LEVEL_WIDTH + x;
+  return (cleared_cells[bit_index >> 3] & (uint8_t)(1 << (bit_index & 7))) != 0;
+}
+
+void markCellCleared(uint8_t x, uint8_t y) {
+  if (x >= LEVEL_WIDTH || y >= LEVEL_HEIGHT) {
+    return;
+  }
+  uint16_t bit_index = (uint16_t)y * LEVEL_WIDTH + x;
+  cleared_cells[bit_index >> 3] |= (uint8_t)(1 << (bit_index & 7));
 }
 
 // Finds the player in the map
@@ -77,27 +113,12 @@ void initializeLevel(const uint8_t level[]) {
 }
 
 uint8_t getBlockAt(const uint8_t level[], uint8_t x, uint8_t y) {
-  if (x >= LEVEL_WIDTH || y >= LEVEL_HEIGHT) {
-    return E_FLOOR;
-  }
-
-  // y is read in inverse order
-  return (pgm_read_byte(level + (((LEVEL_HEIGHT - 1 - y) * LEVEL_WIDTH + x) / 2))
-          >> (!(x % 2) * 4))
-         & 0b1111;
+  return level_get_block(level, x, y);
 }
 
 bool isSpawned(UID uid) {
   for (uint8_t i = 0; i < num_entities; i++) {
     if (entity[i].uid == uid) return true;
-  }
-
-  return false;
-}
-
-bool isStatic(UID uid) {
-  for (uint8_t i = 0; i < num_static_entities; i++) {
-    if (static_entity[i].uid == uid) return true;
   }
 
   return false;
@@ -139,10 +160,10 @@ void spawnFireball(double x, double y) {
   if (dir < 0) dir += FIREBALL_ANGLES * 2;
   entity[num_entities] = create_fireball((uint8_t)x, (uint8_t)y, (uint8_t)dir);
   num_entities++;
+  playSound(fireball_snd, FIREBALL_SND_LEN, SND_PRIO_NORMAL);
 }
 
-void removeEntity(UID uid, bool makeStatic) {
-  (void)makeStatic;
+void removeEntity(UID uid) {
   uint8_t i = 0;
   bool found = false;
 
@@ -160,24 +181,6 @@ void removeEntity(UID uid, bool makeStatic) {
   }
 }
 
-void removeStaticEntity(UID uid) {
-  uint8_t i = 0;
-  bool found = false;
-
-  while (i < num_static_entities) {
-    if (!found && static_entity[i].uid == uid) {
-      found = true;
-      num_static_entities--;
-    }
-
-    if (found && i < num_static_entities) {
-      static_entity[i] = static_entity[i + 1];
-    }
-
-    i++;
-  }
-}
-
 UID detectCollision(const uint8_t level[], Coords *pos, double relative_x, double relative_y, bool only_walls) {
   // Wall collision
   uint8_t round_x = (uint8_t)(int)(pos->x + relative_x);
@@ -185,7 +188,10 @@ UID detectCollision(const uint8_t level[], Coords *pos, double relative_x, doubl
   uint8_t block = getBlockAt(level, round_x, round_y);
 
   if (block == E_WALL) {
-    playSound(hit_wall_snd, HIT_WALL_SND_LEN);
+    // Som de parede toca apenas para o jogador e sem interromper efeitos importantes
+    if (pos == &(player.pos) && !sound) {
+      playSound(hit_wall_snd, HIT_WALL_SND_LEN, SND_PRIO_LOW);
+    }
     return create_uid(block, round_x, round_y);
   }
 
@@ -217,9 +223,10 @@ UID detectCollision(const uint8_t level[], Coords *pos, double relative_x, doubl
   return UID_null;
 }
 
-// Shoot
+// Shoot — chamada apos renderMap() para consultar o Z-buffer exato do frame atual
 void fire() {
-  playSound(shoot_snd, SHOOT_SND_LEN);
+  playSound(shoot_snd, SHOOT_SND_LEN, SND_PRIO_NORMAL);
+  bool hit_any = false;
 
   for (uint8_t i = 0; i < num_entities; i++) {
     if (uid_get_type(entity[i].uid) != E_ENEMY || entity[i].state == S_DEAD || entity[i].state == S_HIDDEN) {
@@ -227,7 +234,18 @@ void fire() {
     }
 
     Coords transform = translateIntoView(&(entity[i].pos));
-    if (abs(transform.x) < 20 && transform.y > 0) {
+    if (abs(transform.x) < 20 && transform.y > 0.1) {
+      int16_t screen_x = (int16_t)(HALF_WIDTH * (1.0 + transform.x / transform.y));
+      if (screen_x < 0 || screen_x >= (int16_t)SCREEN_WIDTH) {
+        continue;
+      }
+
+      // Linha de visao em O(1): impede causar dano atraves de paredes solidas
+      uint16_t enemy_z = encodeZDistance(transform.y);
+      if (enemy_z >= zbuffer[screen_x]) {
+        continue;
+      }
+
       double denom = abs(transform.x) * (double)entity[i].distance;
       uint8_t damage = (denom > 0.0)
                          ? (uint8_t)min((double)GUN_MAX_DAMAGE, (double)GUN_MAX_DAMAGE / denom / 5.0)
@@ -236,8 +254,13 @@ void fire() {
         entity[i].health = (uint8_t)max(0, (int)entity[i].health - (int)damage);
         entity[i].state = S_HIT;
         entity[i].timer = 4;
+        hit_any = true;
       }
     }
+  }
+
+  if (hit_any) {
+    playSound(enemy_hit_snd, ENEMY_HIT_SND_LEN, SND_PRIO_HIGH);
   }
 }
 
@@ -277,6 +300,10 @@ void updateEntities(const uint8_t level[]) {
           if (entity[i].state != S_DEAD) {
             entity[i].state = S_DEAD;
             entity[i].timer = 6;
+            // Marca a celula de spawn original como limpa no bitmask (sem respawn)
+            markCellCleared(uid_get_x(entity[i].uid), uid_get_y(entity[i].uid));
+            enemies_killed++;
+            playSound(enemy_hit_snd, ENEMY_HIT_SND_LEN, SND_PRIO_HIGH);
           }
         } else if (entity[i].state == S_HIT) {
           if (entity[i].timer == 0) {
@@ -316,7 +343,10 @@ void updateEntities(const uint8_t level[]) {
               player.health = (uint8_t)max(0, (int)player.health - ENEMY_MELEE_DAMAGE);
               entity[i].timer = 14;
               flash_screen = 1;
-              updateHud();
+              hud_update_vitals(player.health, player.keys);
+              if (player.health > 0) {
+                playSound(player_hurt_snd, PLAYER_HURT_SND_LEN, SND_PRIO_HIGH);
+              }
             }
           } else {
             entity[i].state = S_STAND;
@@ -329,7 +359,10 @@ void updateEntities(const uint8_t level[]) {
         if (entity[i].distance < FIREBALL_COLLIDER_DIST) {
           player.health = (uint8_t)max(0, (int)player.health - ENEMY_FIREBALL_DAMAGE);
           flash_screen = 1;
-          updateHud();
+          hud_update_vitals(player.health, player.keys);
+          if (player.health > 0) {
+            playSound(player_hurt_snd, PLAYER_HURT_SND_LEN, SND_PRIO_HIGH);
+          }
           removeEntity(entity[i].uid);
           continue;
         } else {
@@ -352,22 +385,26 @@ void updateEntities(const uint8_t level[]) {
 
       case E_MEDIKIT: {
         if (entity[i].distance < ITEM_COLLIDER_DIST) {
-          playSound(medkit_snd, MEDKIT_SND_LEN);
-          entity[i].state = S_HIDDEN;
+          playSound(medkit_snd, MEDKIT_SND_LEN, SND_PRIO_HIGH);
+          markCellCleared(uid_get_x(entity[i].uid), uid_get_y(entity[i].uid));
           player.health = (uint8_t)min(100, (int)player.health + 50);
-          updateHud();
+          hud_update_vitals(player.health, player.keys);
           flash_screen = 1;
+          removeEntity(entity[i].uid);
+          continue;
         }
         break;
       }
 
       case E_KEY: {
         if (entity[i].distance < ITEM_COLLIDER_DIST) {
-          playSound(get_key_snd, GET_KEY_SND_LEN);
-          entity[i].state = S_HIDDEN;
+          playSound(get_key_snd, GET_KEY_SND_LEN, SND_PRIO_HIGH);
+          markCellCleared(uid_get_x(entity[i].uid), uid_get_y(entity[i].uid));
           player.keys++;
-          updateHud();
+          hud_update_vitals(player.health, player.keys);
           flash_screen = 1;
+          removeEntity(entity[i].uid);
+          continue;
         }
         break;
       }
@@ -379,6 +416,9 @@ void updateEntities(const uint8_t level[]) {
 
 // The map raycaster. Based on https://lodev.org/cgtutor/raycasting.html
 void renderMap(const uint8_t level[], double view_height) {
+  // Limpa todo o Z-buffer de 16 bits com 0xFFFF no inicio de cada frame
+  clearZBuffer();
+
   UID last_uid = UID_null;
 
   for (uint8_t x = 0; x < SCREEN_WIDTH; x += RES_DIVIDER) {
@@ -387,7 +427,6 @@ void renderMap(const uint8_t level[], double view_height) {
     double ray_y = player.dir.y + player.plane.y * camera_x;
     uint8_t map_x = (uint8_t)(player.pos.x);
     uint8_t map_y = (uint8_t)(player.pos.y);
-    Coords map_coords = { player.pos.x, player.pos.y };
     double delta_x = abs(1.0 / ray_x);
     double delta_y = abs(1.0 / ray_y);
 
@@ -412,9 +451,10 @@ void renderMap(const uint8_t level[], double view_height) {
       side_y = (map_y + 1.0 - player.pos.y) * delta_y;
     }
 
-    // Wall detection
+    // Wall / Exit detection
     uint8_t depth = 0;
     bool hit = false;
+    bool hit_exit = false;
     bool side = false;
     while (!hit && depth < MAX_RENDER_DEPTH) {
       if (side_x < side_y) {
@@ -431,9 +471,13 @@ void renderMap(const uint8_t level[], double view_height) {
 
       if (block == E_WALL) {
         hit = true;
+      } else if (block == E_EXIT) {
+        hit = true;
+        hit_exit = true;
       } else {
-        if (block == E_ENEMY || (block & 0b00001000)) {
-          if (coords_distance(&(player.pos), &map_coords) < MAX_ENTITY_DISTANCE) {
+        if ((block == E_ENEMY || (block & 0b00001000)) && !isCellCleared(map_x, map_y)) {
+          Coords cell_coords = { (double)map_x + 0.5, (double)map_y + 0.5 };
+          if (coords_distance(&(player.pos), &cell_coords) < MAX_ENTITY_DISTANCE) {
             UID uid = create_uid(block, map_x, map_y);
             if (last_uid != uid && !isSpawned(uid)) {
               spawnEntity(block, map_x, map_y);
@@ -450,24 +494,29 @@ void renderMap(const uint8_t level[], double view_height) {
       double distance;
 
       if (!side) {
-        distance = max(1.0, (map_x - player.pos.x + (1 - step_x) / 2.0) / ray_x);
+        distance = max(WALL_MIN_DIST, (map_x - player.pos.x + (1 - step_x) / 2.0) / ray_x);
       } else {
-        distance = max(1.0, (map_y - player.pos.y + (1 - step_y) / 2.0) / ray_y);
+        distance = max(WALL_MIN_DIST, (map_y - player.pos.y + (1 - step_y) / 2.0) / ray_y);
       }
 
-      zbuffer[x / Z_RES_DIVIDER] = (uint8_t)min(distance * DISTANCE_MULTIPLIER, 255.0);
+      // Grava profundidade de 16 bits em todas as colunas cobertas por RES_DIVIDER
+      uint16_t z_val = encodeZDistance(distance);
+      for (uint8_t c = 0; c < RES_DIVIDER && (x + c) < SCREEN_WIDTH; c++) {
+        zbuffer[x + c] = z_val;
+      }
 
-      uint8_t line_height = (uint8_t)(RENDER_HEIGHT / distance);
+      int16_t line_height = (int16_t)((double)RENDER_HEIGHT / distance);
+      int16_t y_offset    = (int16_t)(view_height / distance);
+      int16_t start_y     = (int16_t)RENDER_HORIZON + y_offset - line_height / 2;
+      int16_t end_y       = (int16_t)RENDER_HORIZON + y_offset + line_height / 2;
 
-      int16_t intensity = GRADIENT_COUNT - (int)(distance / MAX_RENDER_DEPTH * GRADIENT_COUNT) - (side ? 2 : 0);
-      if (intensity < 0) intensity = 0;
-
-      drawVLine(
-        x,
-        (int8_t)(view_height / distance - line_height / 2 + RENDER_HEIGHT / 2),
-        (int8_t)(view_height / distance + line_height / 2 + RENDER_HEIGHT / 2),
-        (uint8_t)intensity
-      );
+      if (hit_exit) {
+        drawExitVLine(x, start_y, end_y);
+      } else {
+        int16_t intensity = GRADIENT_COUNT - (int)(distance / MAX_RENDER_DEPTH * GRADIENT_COUNT) - (side ? 2 : 0);
+        if (intensity < 0) intensity = 0;
+        drawVLine(x, start_y, end_y, (uint8_t)intensity);
+      }
     }
   }
 }
@@ -515,7 +564,7 @@ void renderEntities(double view_height) {
     }
 
     int16_t sprite_screen_x = (int16_t)(HALF_WIDTH * (1.0 + transform.x / transform.y));
-    int8_t sprite_screen_y = (int8_t)(RENDER_HEIGHT / 2 + view_height / transform.y);
+    int16_t sprite_screen_y = (int16_t)(RENDER_HORIZON + view_height / transform.y);
     uint8_t type = uid_get_type(entity[i].uid);
 
     if (sprite_screen_x < -(int16_t)HALF_WIDTH || sprite_screen_x > (int16_t)SCREEN_WIDTH + (int16_t)HALF_WIDTH) {
@@ -540,8 +589,8 @@ void renderEntities(double view_height) {
         }
 
         drawSprite(
-          (int8_t)(sprite_screen_x - BMP_IMP_WIDTH * 0.5 / transform.y),
-          (int8_t)(sprite_screen_y - 8 / transform.y),
+          (int16_t)(sprite_screen_x - (double)BMP_IMP_WIDTH * 0.5 / transform.y),
+          (int16_t)(sprite_screen_y - 8.0 / transform.y),
           bmp_imp_bits,
           bmp_imp_mask,
           BMP_IMP_WIDTH,
@@ -554,8 +603,8 @@ void renderEntities(double view_height) {
 
       case E_FIREBALL: {
         drawSprite(
-          (int8_t)(sprite_screen_x - BMP_FIREBALL_WIDTH / 2 / transform.y),
-          (int8_t)(sprite_screen_y - BMP_FIREBALL_HEIGHT / 2 / transform.y),
+          (int16_t)(sprite_screen_x - (double)BMP_FIREBALL_WIDTH * 0.5 / transform.y),
+          (int16_t)(sprite_screen_y - (double)BMP_FIREBALL_HEIGHT * 0.5 / transform.y),
           bmp_fireball_bits,
           bmp_fireball_mask,
           BMP_FIREBALL_WIDTH,
@@ -568,8 +617,8 @@ void renderEntities(double view_height) {
 
       case E_MEDIKIT: {
         drawSprite(
-          (int8_t)(sprite_screen_x - BMP_ITEMS_WIDTH / 2 / transform.y),
-          (int8_t)(sprite_screen_y + 5 / transform.y),
+          (int16_t)(sprite_screen_x - (double)BMP_ITEMS_WIDTH * 0.5 / transform.y),
+          (int16_t)(sprite_screen_y + 6.0 / transform.y),
           bmp_items_bits,
           bmp_items_mask,
           BMP_ITEMS_WIDTH,
@@ -582,8 +631,8 @@ void renderEntities(double view_height) {
 
       case E_KEY: {
         drawSprite(
-          (int8_t)(sprite_screen_x - BMP_ITEMS_WIDTH / 2 / transform.y),
-          (int8_t)(sprite_screen_y + 5 / transform.y),
+          (int16_t)(sprite_screen_x - (double)BMP_ITEMS_WIDTH * 0.5 / transform.y),
+          (int16_t)(sprite_screen_y + 6.0 / transform.y),
           bmp_items_bits,
           bmp_items_mask,
           BMP_ITEMS_WIDTH,
@@ -598,44 +647,22 @@ void renderEntities(double view_height) {
 }
 
 void renderGun(uint8_t gun_pos, double amount_jogging) {
-  int8_t x = (int8_t)(48 + sin((double)millis() * JOGGING_SPEED) * 10 * amount_jogging);
-  int8_t y = (int8_t)(RENDER_HEIGHT - gun_pos + abs(cos((double)millis() * JOGGING_SPEED)) * 8 * amount_jogging);
+  int16_t x = (int16_t)(48 + sin((double)millis() * JOGGING_SPEED) * 10.0 * amount_jogging);
+  int16_t y = (int16_t)(RENDER_BOTTOM - gun_pos + abs(cos((double)millis() * JOGGING_SPEED)) * 7.0 * amount_jogging);
 
+  // Todo desenho da arma e muzzle flash respeita estritamente [RENDER_TOP, RENDER_BOTTOM)
   if (gun_pos > GUN_SHOT_POS - 2) {
-    display.drawBitmap(x + 6, y - 11, bmp_fire_bits, BMP_FIRE_WIDTH, BMP_FIRE_HEIGHT, 1);
+    drawBitmapViewport(x + 6, y - 11, bmp_fire_bits, BMP_FIRE_WIDTH, BMP_FIRE_HEIGHT, true);
   }
 
-  uint8_t clip_height = (uint8_t)max(0, min((int)y + BMP_GUN_HEIGHT, (int)RENDER_HEIGHT) - (int)y);
-
-  display.drawBitmap(x, y, bmp_gun_mask, BMP_GUN_WIDTH, clip_height, 0);
-  display.drawBitmap(x, y, bmp_gun_bits, BMP_GUN_WIDTH, clip_height, 1);
-}
-
-// Only needed first time
-void renderHud() {
-  drawText(2, 58, F("{}"), 0);        // Health symbol
-  drawText(40, 58, F("[]"), 0);       // Keys symbol
-  updateHud();
-}
-
-// Render values for the HUD
-void updateHud() {
-  display.clearRect(12, 58, 15, 6);
-  display.clearRect(50, 58, 5, 6);
-
-  drawText((uint8_t)12, (uint8_t)58, player.health);
-  drawText((uint8_t)50, (uint8_t)58, player.keys);
-}
-
-// Debug stats
-void renderStats() {
-  display.clearRect(58, 58, 70, 6);
-  drawText((uint8_t)114, (uint8_t)58, (uint8_t)getActualFps());
-  drawText((uint8_t)82, (uint8_t)58, num_entities);
+  drawBitmapViewport(x, y, bmp_gun_mask, BMP_GUN_WIDTH, BMP_GUN_HEIGHT, false);
+  drawBitmapViewport(x, y, bmp_gun_bits, BMP_GUN_WIDTH, BMP_GUN_HEIGHT, true);
 }
 
 // Intro screen
 void loopIntro() {
+  display.invertDisplay(false);
+  display.clearDisplay();
   display.drawBitmap(
     (SCREEN_WIDTH - BMP_LOGO_WIDTH) / 2,
     (SCREEN_HEIGHT - BMP_LOGO_HEIGHT) / 3,
@@ -646,7 +673,7 @@ void loopIntro() {
   );
 
   delay(1000);
-  drawText((int8_t)(SCREEN_WIDTH / 2 - 25), (int8_t)(SCREEN_HEIGHT * 0.8), F("PRESS FIRE"));
+  drawText((int16_t)(SCREEN_WIDTH / 2 - 25), (int16_t)(SCREEN_HEIGHT * 0.8), F("PRESS FIRE"));
   display.display();
 
   // Sincroniza estado de botoes apos o delay antes de aguardar borda de disparo
@@ -655,6 +682,7 @@ void loopIntro() {
   while (!exit_scene) {
     input_update();
     if (input_fire_just_pressed()) {
+      playSound(ui_click_snd, UI_CLICK_SND_LEN, SND_PRIO_NORMAL);
       jumpTo(GAME_PLAY);
     }
   }
@@ -662,6 +690,7 @@ void loopIntro() {
 
 void loopGamePlay() {
   bool walkSoundToggle = false;
+  bool death_triggered = false;
   uint8_t gun_pos = 0;
   double rot_speed = 0;
   double old_dir_x = 0;
@@ -670,13 +699,15 @@ void loopGamePlay() {
   double jogging = 0;
   uint8_t fade = GRADIENT_COUNT - 1;
 
-  // Reset per-game state cleanly
-  num_entities = 0;
-  num_static_entities = 0;
-  flash_screen = 0;
-  invert_screen = false;
-
+  // Reset completo de entidades, bitmask de persistencia e estatisticas da partida
+  resetLevelState();
   initializeLevel(sto_level_1);
+  game_start_ms = millis();
+
+  display.invertDisplay(false);
+  display.clearDisplay();
+  hud_render_full(player.health, player.keys, (uint8_t)getActualFps(), false, minimap_enabled);
+
   input_update(); // Descarta qualquer borda pendente vinda da tela anterior
   lastFrameTime = millis();
 
@@ -684,10 +715,19 @@ void loopGamePlay() {
     fps();
     input_update();
 
-    // Clear only the 3d view
-    memset(display_buf, 0, SCREEN_WIDTH * (RENDER_HEIGHT / 8));
+    // Limpa exclusivamente o viewport 3D azul (paginas 2..7 = 768 bytes), preservando o HUD amarelo (paginas 0..1)
+    memset(display_buf + SCREEN_WIDTH * (RENDER_TOP / 8), 0, SCREEN_WIDTH * (RENDER_HEIGHT / 8));
+
+    bool pending_fire = false;
+    bool is_sprinting = false;
 
     if (player.health > 0) {
+      // Alterna o minimapa 2D no clique unico do joystick direito
+      if (input_action_sw_right_just_pressed()) {
+        minimap_enabled = !minimap_enabled;
+        playSound(ui_click_snd, UI_CLICK_SND_LEN, SND_PRIO_NORMAL);
+      }
+
       // Leitura proporcional frente/tras + strafe lateral com normalizacao diagonal
       double move_fwd = (double)input_move_forward();
       double move_str = (double)input_move_strafe();
@@ -700,7 +740,8 @@ void loopGamePlay() {
 
       // Sprint (clique esquerdo SW pressionado enquanto o jogador se move)
       double max_speed = MOV_SPEED;
-      if (input_sprint() && move_mag_sq > 0.0) {
+      is_sprinting = input_sprint();
+      if (is_sprinting && move_mag_sq > 0.0) {
         max_speed *= SPRINT_MULTIPLIER;
       }
 
@@ -737,7 +778,6 @@ void loopGamePlay() {
       }
 
       // Rotacao proporcional da camera (pula cos/sin quando o analogico esta neutro)
-      // Convencao: dir=(1,0), plane=(0,-0.66) => turn > 0 (direita) usa angulo negativo
       float turn = input_turn();
       if (turn != 0.0f) {
         rot_speed = -(double)turn * ROT_SPEED * delta;
@@ -753,71 +793,95 @@ void loopGamePlay() {
         player.plane.y = old_plane_x * sin_r + player.plane.y * cos_r;
       }
 
-      view_height = abs(sin((double)millis() * JOGGING_SPEED)) * 6 * jogging;
+      view_height = abs(sin((double)millis() * JOGGING_SPEED)) * 6.0 * jogging;
 
-      if (view_height > 5.9) {
-        if (!sound) {
-          if (walkSoundToggle) {
-            playSound(walk1_snd, WALK1_SND_LEN);
-            walkSoundToggle = false;
-          } else {
-            playSound(walk2_snd, WALK2_SND_LEN);
-            walkSoundToggle = true;
-          }
+      // Passos so tocam se nenhum som estiver ativo (e com prioridade baixa)
+      if (view_height > 5.9 && !sound) {
+        if (walkSoundToggle) {
+          playSound(walk1_snd, WALK1_SND_LEN, SND_PRIO_LOW);
+          walkSoundToggle = false;
+        } else {
+          playSound(walk2_snd, WALK2_SND_LEN, SND_PRIO_LOW);
+          walkSoundToggle = true;
         }
       }
 
-      // Controle de disparo por borda (evita tiro acidental ao segurar gatilho na transicao)
+      // Controle de disparo por borda (execucao de fire() ocorre logo apos renderMap())
       if (gun_pos > GUN_TARGET_POS) {
         gun_pos -= 1;
       } else if (gun_pos < GUN_TARGET_POS) {
         gun_pos += 2;
       } else if (input_fire_just_pressed()) {
         gun_pos = GUN_SHOT_POS;
-        fire();
+        pending_fire = true;
       }
 
       // Aplicacao do movimento vetorial:
       //   frente  = (+dir.x, +dir.y)
-      //   direita = (+dir.y, -dir.x) (mesmo sentido de player.plane)
+      //   direita = (+dir.y, -dir.x)
       if (player.velocity != 0.0 || player.strafe_velocity != 0.0) {
         double move_dx = (player.dir.x * player.velocity + player.dir.y * player.strafe_velocity) * delta;
         double move_dy = (player.dir.y * player.velocity - player.dir.x * player.strafe_velocity) * delta;
         updatePosition(sto_level_1, &(player.pos), move_dx, move_dy);
       }
+
+      // Verifica condicao de vitoria ao alcancar a celula E_EXIT
+      if (getBlockAt(sto_level_1, (uint8_t)player.pos.x, (uint8_t)player.pos.y) == E_EXIT) {
+        final_time_sec = (uint16_t)((millis() - game_start_ms) / 1000UL);
+        playSound(victory_snd, VICTORY_SND_LEN, SND_PRIO_CRITICAL);
+        jumpTo(VICTORY);
+      }
     } else {
-      // Jogador morto: interrompe imediatamente qualquer deslizamento residual
+      // Jogador morto: zera velocidades, toca som de derrota e executa queda curta da camera
       player.velocity = 0.0;
       player.strafe_velocity = 0.0;
       jogging = 0.0;
 
-      if (view_height > -10) {
-        view_height--;
-      } else if (input_fire_just_pressed()) {
-        jumpTo(INTRO);
+      if (!death_triggered) {
+        death_triggered = true;
+        final_time_sec = (uint16_t)((millis() - game_start_ms) / 1000UL);
+        playSound(game_over_snd, GAME_OVER_SND_LEN, SND_PRIO_CRITICAL);
       }
 
+      if (view_height > -12.0) {
+        view_height -= 1.0;
+      }
       if (gun_pos > 1) {
         gun_pos -= 2;
+      } else {
+        gun_pos = 0;
+      }
+
+      if (view_height <= -12.0 && gun_pos == 0) {
+        jumpTo(GAME_OVER);
       }
     }
 
     updateEntities(sto_level_1);
 
+    // Raycast de paredes e saida preenche o Z-buffer de 16 bits do frame atual
     renderMap(sto_level_1, view_height);
+
+    // Aplica disparo com teste de linha de visao contra o Z-buffer recem-calculado
+    if (pending_fire) {
+      fire();
+    }
+
     renderEntities(view_height);
     renderGun(gun_pos, jogging);
 
-    if (fade > 0) {
-      fadeScreen(fade);
-      fade--;
-
-      if (fade == 0) {
-        renderHud();
-      }
-    } else {
-      renderStats();
+    // Radar 2D desenhado sobre o canto direito da faixa azul quando ativo
+    if (minimap_enabled && !exit_scene) {
+      minimap_render(sto_level_1, player, entity, num_entities);
     }
+
+    // Fade-in aplicado apenas ao viewport azul (y = 16..63), sem corromper o HUD amarelo
+    if (fade > 0) {
+      fadeScreen(fade, false, true);
+      fade--;
+    }
+
+    hud_update_stats((uint8_t)getActualFps(), is_sprinting, minimap_enabled);
 
     if (flash_screen > 0) {
       invert_screen = !invert_screen;
@@ -831,6 +895,65 @@ void loopGamePlay() {
   } while (!exit_scene);
 }
 
+// Tela unificada de fim de partida aproveitando o OLED Dual-Color:
+//   Faixa amarela (y = 0..15): titulo em destaque ("YOU WIN" ou "GAME OVER")
+//   Faixa azul   (y = 16..63): KILLS, KEYS, TIME (segundos) e prompt de reinicio
+void loopEndScreen(bool victory) {
+  display.invertDisplay(false);
+  display.clearDisplay();
+
+  // Titulo na faixa amarela superior (y = 0..15)
+  if (victory) {
+    drawText(47, 4, F("YOU WIN"));
+  } else {
+    drawText(42, 4, F("GAME OVER"));
+  }
+  for (uint8_t x = 0; x < SCREEN_WIDTH; x++) {
+    drawPixel(x, 15, true, false);
+  }
+
+  // Estatisticas na faixa azul inferior (y = 16..63)
+  drawText(20, 21, F("KILLS"));
+  drawTextNum(76, 21, enemies_killed);
+
+  drawText(20, 30, F("KEYS"));
+  drawTextNum(76, 30, (uint16_t)player.keys);
+
+  drawText(20, 39, F("TIME"));
+  drawTextNum(76, 39, final_time_sec);
+  // Posiciona sufixo 'S' (segundos) logo apos os digitos do tempo
+  uint8_t digits = 1;
+  uint16_t t = final_time_sec;
+  while (t >= 10) {
+    t /= 10;
+    digits++;
+  }
+  drawText((int16_t)(76 + digits * 5 + 1), 39, F("S"));
+
+  // Prompt de reinicio imediato (Fire ou clique direito SW)
+  drawText(19, 53, F("PRESS FIRE OR R-SW"));
+  display.display();
+
+  delay(300);
+  input_update();
+
+  while (!exit_scene) {
+    input_update();
+    if (input_fire_just_pressed() || input_action_sw_right_just_pressed()) {
+      playSound(ui_click_snd, UI_CLICK_SND_LEN, SND_PRIO_NORMAL);
+      jumpTo(GAME_PLAY);
+    }
+  }
+}
+
+void loopGameOver() {
+  loopEndScreen(false);
+}
+
+void loopVictory() {
+  loopEndScreen(true);
+}
+
 void loop(void) {
   switch (scene) {
     case INTRO: {
@@ -841,10 +964,19 @@ void loop(void) {
       loopGamePlay();
       break;
     }
+    case GAME_OVER: {
+      loopGameOver();
+      break;
+    }
+    case VICTORY: {
+      loopVictory();
+      break;
+    }
   }
 
+  // Fade-out de transicao de cena apaga a tela inteira (y = 0..63)
   for (uint8_t i = 0; i < GRADIENT_COUNT; i++) {
-    fadeScreen(i, false);
+    fadeScreen(i, false, false);
     display.display();
     delay(40);
   }

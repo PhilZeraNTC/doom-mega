@@ -23,3 +23,11 @@ UID create_uid(EType type, uint8_t x, uint8_t y) {
 EType uid_get_type(UID uid) {
   return (EType)(uid & 0x0F);
 }
+
+uint8_t uid_get_x(UID uid) {
+  return (uint8_t)((uid >> 4) & (LEVEL_WIDTH - 1));
+}
+
+uint8_t uid_get_y(UID uid) {
+  return (uint8_t)(uid >> (4 + LEVEL_WIDTH_BASE));
+}

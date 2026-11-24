@@ -15,26 +15,32 @@ extern uint32_t lastFrameTime;
 extern uint8_t *display_buf;
 #endif
 
-extern uint8_t zbuffer[ZBUFFER_SIZE];
+// Z-buffer de 16 bits por coluna de tela (128 * 2 = 256 bytes de SRAM)
+extern uint16_t zbuffer[SCREEN_WIDTH];
 
 void setupDisplay();
+void clearZBuffer();
+uint16_t encodeZDistance(double distance);
 void fps();
 double getActualFps();
 bool getGradientPixel(uint8_t x, uint8_t y, uint8_t i);
-void fadeScreen(uint8_t intensity, bool color = false);
+void fadeScreen(uint8_t intensity, bool color = false, bool onlyViewport = false);
 void drawByte(uint8_t x, uint8_t y, uint8_t b);
-void drawPixel(int8_t x, int8_t y, bool color, bool raycasterViewport = false);
-void drawVLine(uint8_t x, int8_t start_y, int8_t end_y, uint8_t intensity);
+void drawPixel(int16_t x, int16_t y, bool color, bool raycasterViewport = false);
+void drawVLine(uint8_t x, int16_t start_y, int16_t end_y, uint8_t intensity);
+void drawExitVLine(uint8_t x, int16_t start_y, int16_t end_y);
+void drawBitmapViewport(int16_t x, int16_t y, const uint8_t bitmap[], int16_t w, int16_t h, bool color);
 void drawSprite(
-  int8_t x, int8_t y,
+  int16_t x, int16_t y,
   const uint8_t bitmap[], const uint8_t mask[],
   int16_t w, int16_t h,
   uint8_t sprite,
   double distance
 );
-void drawChar(int8_t x, int8_t y, char ch);
-void drawText(int8_t x, int8_t y, const char *txt, uint8_t space = 1);
-void drawText(int8_t x, int8_t y, const __FlashStringHelper *txt_p, uint8_t space = 1);
+void drawChar(int16_t x, int16_t y, char ch);
+void drawText(int16_t x, int16_t y, const char *txt, uint8_t space = 1);
+void drawText(int16_t x, int16_t y, const __FlashStringHelper *txt_p, uint8_t space = 1);
 void drawText(uint8_t x, uint8_t y, uint8_t num);
+void drawTextNum(int16_t x, int16_t y, uint16_t num);
 
 #endif // DISPLAY_H

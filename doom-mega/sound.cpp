@@ -51,10 +51,50 @@ const uint8_t medkit_snd[MEDKIT_SND_LEN] PROGMEM = {
   0x15
 };
 
-static volatile uint8_t  idx     = 0;
-volatile bool            sound   = false;
-static volatile uint16_t snd_ptr = 0;
-static volatile uint8_t  snd_len = 0;
+// Novos efeitos sonoros da Fase 5 (formato Inverse Frequency Sound; 0x00 = pausa)
+const uint8_t enemy_hit_snd[ENEMY_HIT_SND_LEN] PROGMEM = {
+  0x16, 0x14, 0x1a, 0x22, 0x2c, 0x38, 0x44,
+  0x52, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0
+};
+
+const uint8_t player_hurt_snd[PLAYER_HURT_SND_LEN] PROGMEM = {
+  0x48, 0x56, 0x64, 0x52, 0x68, 0x78, 0x88, 0x74, 0x8c,
+  0x9c, 0xaa, 0xb8, 0xc4, 0xce, 0xd6, 0xde, 0xe4, 0xea
+};
+
+const uint8_t fireball_snd[FIREBALL_SND_LEN] PROGMEM = {
+  0x58, 0x48, 0x3a, 0x2e, 0x24, 0x1e, 0x22, 0x28,
+  0x32, 0x3e, 0x4c, 0x5c, 0x6e, 0x80, 0x94
+};
+
+const uint8_t ui_click_snd[UI_CLICK_SND_LEN] PROGMEM = {
+  0x14, 0x10, 0x0d, 0x12
+};
+
+// Sequencia descendente de derrota (4 notas com pausas curtas)
+const uint8_t game_over_snd[GAME_OVER_SND_LEN] PROGMEM = {
+  0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x00, 0x00,
+  0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x00, 0x00,
+  0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x00, 0x00,
+  0x44, 0x48, 0x4c, 0x50, 0x56, 0x5c, 0x62, 0x68,
+  0x6e, 0x74, 0x7a, 0x80, 0x86, 0x8c, 0x92, 0x98
+};
+
+// Fanfarra ascendente de vitoria (C5 -> E5 -> G5 -> C6)
+const uint8_t victory_snd[VICTORY_SND_LEN] PROGMEM = {
+  0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x26, 0x00, 0x00,
+  0x1e, 0x1e, 0x1e, 0x1e, 0x1e, 0x1e, 0x1e, 0x1e, 0x00, 0x00,
+  0x19, 0x19, 0x19, 0x19, 0x19, 0x19, 0x19, 0x19, 0x00, 0x00,
+  0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+  0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
+  0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13
+};
+
+static volatile uint8_t  idx          = 0;
+volatile bool            sound        = false;
+static volatile uint16_t snd_ptr      = 0;
+static volatile uint8_t  snd_len      = 0;
+static volatile uint8_t  current_prio = 0;
 
 static void setFrequency(uint16_t freq) {
   if (freq == 0) {
@@ -107,10 +147,11 @@ void sound_init() {
 
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
     sound_off();
-    idx     = 0;
-    sound   = false;
-    snd_ptr = 0;
-    snd_len = 0;
+    idx          = 0;
+    sound        = false;
+    snd_ptr      = 0;
+    snd_len      = 0;
+    current_prio = 0;
 
     TCCR2A = (1 << WGM21);                             // CTC mode
     TCCR2B = (1 << CS22) | (1 << CS21) | (1 << CS20);  // prescaler 1024
@@ -120,12 +161,17 @@ void sound_init() {
   }
 }
 
-void playSound(const uint8_t *snd, uint8_t len) {
+void playSound(const uint8_t *snd, uint8_t len, uint8_t priority) {
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    snd_ptr = reinterpret_cast<uint16_t>(snd);
-    snd_len = len;
-    idx     = 0;
-    sound   = (snd != nullptr && len > 0);
+    if (sound && priority < current_prio) {
+      return;
+    }
+
+    snd_ptr      = reinterpret_cast<uint16_t>(snd);
+    snd_len      = len;
+    idx          = 0;
+    current_prio = priority;
+    sound        = (snd != nullptr && len > 0);
   }
 }
 
@@ -141,9 +187,10 @@ ISR(TIMER2_COMPA_vect) {
         setFrequency(freq);
       }
     } else {
-      idx = 0;
+      idx          = 0;
+      current_prio = 0;
       sound_off();
-      sound = false;
+      sound        = false;
     }
   }
 }
