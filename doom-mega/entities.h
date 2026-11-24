@@ -9,7 +9,8 @@
     create_coords((double)(x) + 0.5, (double)(y) + 0.5), \
     create_coords(1, 0), \
     create_coords(0, -0.66), \
-    0, \
+    0.0, \
+    0.0, \
     100, \
     0 \
   }
@@ -34,7 +35,8 @@ struct Player {
   Coords pos;
   Coords dir;
   Coords plane;
-  double velocity;
+  double velocity;         // velocidade longitudinal (frente/tras)
+  double strafe_velocity;  // velocidade lateral (esquerda/direita)
   uint8_t health;
   uint8_t keys;
 };

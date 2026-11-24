@@ -56,7 +56,7 @@ O jogo não utiliza `Wire.h` nem `Adafruit_GFX`; usa um driver TWI bare-metal di
 | Push-Button Comum | Tiro | `PIN_BTN_FIRE` | **D26** | `INPUT_PULLUP` (ativo em `LOW`); já mapeado como `K_FIRE` |
 | Buzzer Passivo | Sinal PWM/CTC | `PIN_BUZZER` | **D11** (`PB5`/`OC1A`) | Saída direta do Timer1 `OC1A` |
 
-> **Nota da Fase 2:** `input.cpp` mantém provisoriamente leitura digital (`K_FIRE = PIN_BTN_FIRE = D26` e `K_UP/K_DOWN/K_LEFT/K_RIGHT` em `D28/D30/D32/D34` com `INPUT_PULLUP`) apenas para compilar a base antes da introdução do driver analógico dos joysticks KY-023 na Fase 3.
+> **Status atual (Fase 3):** `input.cpp` opera integralmente com os 2 módulos analógicos KY-023 (`A0..A3`, `D22`, `D24`) e o botão de tiro (`D26`).
 
 ---
 
@@ -68,3 +68,31 @@ O jogo não utiliza `Wire.h` nem `Adafruit_GFX`; usa um driver TWI bare-metal di
   - Eliminação de VLA (`uint8_t tmp[n]`) em `SSD1306.cpp` por envio em blocos fixos de 16 bytes.
   - Separação modular de `display.h`/`.cpp` e `sound.h`/`.cpp` com include guards e protótipo `drawText(..., const __FlashStringHelper *txt_p, ...)` corrigido.
   - Remoção de comportamentos indefinidos: `sortEntities()` alterada para `void`, correção de loops/comparações `uint8_t` (`initializeLevel`, `getBlockAt`), acesso out-of-bounds em `removeEntity`/`removeStaticEntity`, shift com sinal em `create_uid()`, typo `crate_static_entity`, inicialização de `bp`, `last_uid`, `view_height`, `jogging`, reset de `num_entities` e `lastFrameTime` ao iniciar partida.
+
+---
+
+## 5. Controles Twin-Stick FPS e Cinemática Vetorial (Fase 3)
+
+### 5.1. Conversão A/D de 10 bits, Calibração Dinâmica e Deadzone Contínua (`input.cpp`)
+- **ADC de 10 bits no ATmega2560:** cada potenciômetro dos módulos KY-023 (`A0..A3`) é convertido pelo ADC interno em um inteiro de `0` a `1023` ($2^{10} - 1$).
+- **Calibração dinâmica do centro no boot (`input_calibrate()`):** potenciômetros mecânicos baratos raramente descansam exatamente em `512` (podem variar entre ~480 e ~540). No `setup()`, o driver descarta a primeira leitura após trocar o canal do multiplexador (estabilização do capacitor *Sample-and-Hold*) e calcula a média de **16 amostras** (`JOY_CAL_SAMPLES`) para cada um dos 4 eixos em repouso, armazenando o centro real `center_*`.
+- **Deadzone com remapeamento contínuo (`normalizeAxis()`):** em vez de um corte abrupto (que criaria um "degrau" de saída ao sair da zona morta), o valor fora de `±JOY_DEADZONE` (`±80`) é subtraído da borda da deadzone e dividido pelo curso útil restante até o batente (`1023 - center - deadzone` no lado positivo; `center - deadzone` no lado negativo):
+  $$u = \begin{cases} 0 & \text{se } |\text{raw} - c| \le D \\ +\dfrac{(\text{raw} - c) - D}{(1023 - c) - D} & \text{se } \text{raw} - c > D \\ -\dfrac{(c - \text{raw}) - D}{c - D} & \text{se } \text{raw} - c < -D \end{cases}$$
+  Isso garante saída `0.0` estável em repouso, transição suave a partir de `0.0` fora da zona morta e saturação simétrica em `±1.0` nos batentes, mesmo com centro físico assimétrico. Flags `JOY_*_INVERT_*` em `pinout.h` permitem inverter qualquer eixo em uma linha caso o módulo seja montado girado na protoboard.
+
+### 5.2. Debounce Não-Bloqueante e Detecção de Borda (`INPUT_PULLUP`)
+- Os 3 botões digitais (`PIN_BTN_FIRE = D26`, `PIN_JOY_L_SW = D22`, `PIN_JOY_R_SW = D24`) usam resistores internos `INPUT_PULLUP` (lógica ativa-baixa: pressionado = `LOW`).
+- Cada botão mantém estado bruto (`raw_state`), estado estável (`stable_state`), timestamp da última transição (`last_change_ms`) e flag de evento único (`just_pressed`).
+- Uma mudança só é promovida para `stable_state` após permanecer consistente por `BTN_DEBOUNCE_MS` (`30 ms`) medidos via `millis()` — sem `delay()` bloqueante.
+- A flag `just_pressed` é levantada por **exatamente um ciclo de `input_update()`** na transição `solto → pressionado` (borda de descida elétrica). Com isso, confirmar início em `loopIntro()` ou reiniciar após morte não gera disparo acidental no primeiro frame da partida.
+
+### 5.3. Matemática Vetorial do Strafe, Normalização Diagonal e Otimização de Rotação
+- **Convenção de base da câmera no raycaster:** em `entities.h`, o jogador inicia olhando em $\vec{d} = (1, 0)$ com plano de câmera $\vec{p} = (0, -0{,}66)$. Como o raycaster calcula $\vec{r} = \vec{d} + \text{camera\_x}\cdot\vec{p}$ com $\text{camera\_x} \in [-1, +1]$ da esquerda para a direita da tela, $\vec{p}$ aponta sempre para a **direita da câmera**.
+- **Vetor ortogonal de strafe:** o vetor unitário na mesma direção de $\vec{p}$ (direita) é obtido girando $\vec{d}$ por $-90^\circ$:
+  $$\vec{r}_{\text{dir}} = (+d_y,\; -d_x)$$
+  Assim, o deslocamento no mundo combinando velocidade longitudinal $v$ e lateral $s$ é:
+  $$\Delta x = (d_x \cdot v + d_y \cdot s)\cdot\Delta t, \qquad \Delta y = (d_y \cdot v - d_x \cdot s)\cdot\Delta t$$
+- **Rotação coerente:** para `input_turn() > 0` (direita), aplica-se matriz de rotação 2D com ângulo negativo $\theta = -\text{turn}\cdot\text{ROT\_SPEED}\cdot\Delta t$ em $\vec{d}$ e $\vec{p}$ simultaneamente, mantendo $\vec{r}_{\text{dir}}$ sempre alinhado a $\vec{p}$.
+- **Normalização diagonal:** como os dois eixos do joystick formam um domínio quadrado $[-1, 1]^2$, empurrar na diagonal produziria magnitude $\sqrt{1^2 + 1^2} \approx 1{,}414$ (+41% de velocidade). Quando `fwd² + str² > 1.0`, o vetor é reescalado por $1 / \sqrt{\text{fwd}^2 + \text{str}^2}$, mantendo velocidade uniforme em $360^\circ$ (e evitando `sqrt()` quando a norma já está dentro do círculo unitário).
+- **Economia de CPU de 8 bits:** na rotação, `cos()` e `sin()` são completamente **ignorados** quando `input_turn() == 0.0f` (analógico dentro da deadzone) e, quando ativos, calculados apenas **1 vez por frame** (antes eram calculados 4 vezes por frame).
+

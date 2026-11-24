@@ -649,13 +649,18 @@ void loopIntro() {
   drawText((int8_t)(SCREEN_WIDTH / 2 - 25), (int8_t)(SCREEN_HEIGHT * 0.8), F("PRESS FIRE"));
   display.display();
 
+  // Sincroniza estado de botoes apos o delay antes de aguardar borda de disparo
+  input_update();
+
   while (!exit_scene) {
-    if (input_fire()) jumpTo(GAME_PLAY);
+    input_update();
+    if (input_fire_just_pressed()) {
+      jumpTo(GAME_PLAY);
+    }
   }
 }
 
 void loopGamePlay() {
-  bool gun_fired = false;
   bool walkSoundToggle = false;
   uint8_t gun_pos = 0;
   double rot_speed = 0;
@@ -672,42 +677,80 @@ void loopGamePlay() {
   invert_screen = false;
 
   initializeLevel(sto_level_1);
+  input_update(); // Descarta qualquer borda pendente vinda da tela anterior
   lastFrameTime = millis();
 
   do {
     fps();
+    input_update();
 
     // Clear only the 3d view
     memset(display_buf, 0, SCREEN_WIDTH * (RENDER_HEIGHT / 8));
 
     if (player.health > 0) {
-      if (input_up()) {
-        player.velocity += (MOV_SPEED - player.velocity) * 0.4;
-        jogging = abs(player.velocity) * MOV_SPEED_INV;
-      } else if (input_down()) {
-        player.velocity += (-MOV_SPEED - player.velocity) * 0.4;
-        jogging = abs(player.velocity) * MOV_SPEED_INV;
-      } else {
-        player.velocity *= 0.5;
-        jogging = abs(player.velocity) * MOV_SPEED_INV;
+      // Leitura proporcional frente/tras + strafe lateral com normalizacao diagonal
+      double move_fwd = (double)input_move_forward();
+      double move_str = (double)input_move_strafe();
+      double move_mag_sq = move_fwd * move_fwd + move_str * move_str;
+      if (move_mag_sq > 1.0) {
+        double inv_mag = 1.0 / sqrt(move_mag_sq);
+        move_fwd *= inv_mag;
+        move_str *= inv_mag;
       }
 
-      if (input_right()) {
-        rot_speed = ROT_SPEED * delta;
+      // Sprint (clique esquerdo SW pressionado enquanto o jogador se move)
+      double max_speed = MOV_SPEED;
+      if (input_sprint() && move_mag_sq > 0.0) {
+        max_speed *= SPRINT_MULTIPLIER;
+      }
+
+      double target_vel    = move_fwd * max_speed;
+      double target_strafe = move_str * max_speed;
+
+      // Resposta firme sem excesso de inercia ("gelo")
+      if (move_fwd != 0.0) {
+        player.velocity += (target_vel - player.velocity) * MOV_ACCEL;
+      } else {
+        player.velocity *= MOV_FRICTION;
+      }
+
+      if (move_str != 0.0) {
+        player.strafe_velocity += (target_strafe - player.strafe_velocity) * MOV_ACCEL;
+      } else {
+        player.strafe_velocity *= MOV_FRICTION;
+      }
+
+      if (abs(player.velocity) < VEL_STOP_EPSILON) {
+        player.velocity = 0.0;
+      }
+      if (abs(player.strafe_velocity) < VEL_STOP_EPSILON) {
+        player.strafe_velocity = 0.0;
+      }
+
+      // Magnitude total da velocidade para head-bobbing (jogging)
+      double vel_sq = player.velocity * player.velocity + player.strafe_velocity * player.strafe_velocity;
+      if (vel_sq > 0.0) {
+        jogging = sqrt(vel_sq) * MOV_SPEED_INV;
+        if (jogging > 1.35) jogging = 1.35;
+      } else {
+        jogging = 0.0;
+      }
+
+      // Rotacao proporcional da camera (pula cos/sin quando o analogico esta neutro)
+      // Convencao: dir=(1,0), plane=(0,-0.66) => turn > 0 (direita) usa angulo negativo
+      float turn = input_turn();
+      if (turn != 0.0f) {
+        rot_speed = -(double)turn * ROT_SPEED * delta;
+        double cos_r = cos(rot_speed);
+        double sin_r = sin(rot_speed);
+
         old_dir_x = player.dir.x;
-        player.dir.x = player.dir.x * cos(-rot_speed) - player.dir.y * sin(-rot_speed);
-        player.dir.y = old_dir_x * sin(-rot_speed) + player.dir.y * cos(-rot_speed);
+        player.dir.x = player.dir.x * cos_r - player.dir.y * sin_r;
+        player.dir.y = old_dir_x * sin_r + player.dir.y * cos_r;
+
         old_plane_x = player.plane.x;
-        player.plane.x = player.plane.x * cos(-rot_speed) - player.plane.y * sin(-rot_speed);
-        player.plane.y = old_plane_x * sin(-rot_speed) + player.plane.y * cos(-rot_speed);
-      } else if (input_left()) {
-        rot_speed = ROT_SPEED * delta;
-        old_dir_x = player.dir.x;
-        player.dir.x = player.dir.x * cos(rot_speed) - player.dir.y * sin(rot_speed);
-        player.dir.y = old_dir_x * sin(rot_speed) + player.dir.y * cos(rot_speed);
-        old_plane_x = player.plane.x;
-        player.plane.x = player.plane.x * cos(rot_speed) - player.plane.y * sin(rot_speed);
-        player.plane.y = old_plane_x * sin(rot_speed) + player.plane.y * cos(rot_speed);
+        player.plane.x = player.plane.x * cos_r - player.plane.y * sin_r;
+        player.plane.y = old_plane_x * sin_r + player.plane.y * cos_r;
       }
 
       view_height = abs(sin((double)millis() * JOGGING_SPEED)) * 6 * jogging;
@@ -724,34 +767,39 @@ void loopGamePlay() {
         }
       }
 
+      // Controle de disparo por borda (evita tiro acidental ao segurar gatilho na transicao)
       if (gun_pos > GUN_TARGET_POS) {
         gun_pos -= 1;
       } else if (gun_pos < GUN_TARGET_POS) {
         gun_pos += 2;
-      } else if (!gun_fired && input_fire()) {
+      } else if (input_fire_just_pressed()) {
         gun_pos = GUN_SHOT_POS;
-        gun_fired = true;
         fire();
-      } else if (gun_fired && !input_fire()) {
-        gun_fired = false;
+      }
+
+      // Aplicacao do movimento vetorial:
+      //   frente  = (+dir.x, +dir.y)
+      //   direita = (+dir.y, -dir.x) (mesmo sentido de player.plane)
+      if (player.velocity != 0.0 || player.strafe_velocity != 0.0) {
+        double move_dx = (player.dir.x * player.velocity + player.dir.y * player.strafe_velocity) * delta;
+        double move_dy = (player.dir.y * player.velocity - player.dir.x * player.strafe_velocity) * delta;
+        updatePosition(sto_level_1, &(player.pos), move_dx, move_dy);
       }
     } else {
-      // Player is dead
-      if (view_height > -10) view_height--;
-      else if (input_fire()) jumpTo(INTRO);
+      // Jogador morto: interrompe imediatamente qualquer deslizamento residual
+      player.velocity = 0.0;
+      player.strafe_velocity = 0.0;
+      jogging = 0.0;
 
-      if (gun_pos > 1) gun_pos -= 2;
-    }
+      if (view_height > -10) {
+        view_height--;
+      } else if (input_fire_just_pressed()) {
+        jumpTo(INTRO);
+      }
 
-    if (abs(player.velocity) > 0.003) {
-      updatePosition(
-        sto_level_1,
-        &(player.pos),
-        player.dir.x * player.velocity * delta,
-        player.dir.y * player.velocity * delta
-      );
-    } else {
-      player.velocity = 0;
+      if (gun_pos > 1) {
+        gun_pos -= 2;
+      }
     }
 
     updateEntities(sto_level_1);
@@ -780,10 +828,6 @@ void loopGamePlay() {
 
     display.invertDisplay(invert_screen);
     display.display();
-
-    if (input_left() && input_right()) {
-      jumpTo(INTRO);
-    }
   } while (!exit_scene);
 }
 

@@ -32,6 +32,10 @@
 #define ROT_SPEED             0.12
 #define MOV_SPEED             0.2
 #define MOV_SPEED_INV         5         // 1 / MOV_SPEED
+#define SPRINT_MULTIPLIER     1.5       // Multiplicador de velocidade com PIN_JOY_L_SW pressionado
+#define MOV_ACCEL             0.6       // Resposta firme de aceleracao (0..1)
+#define MOV_FRICTION          0.35      // Amortecimento rapido ao soltar o analogico (sem sensacao de gelo)
+#define VEL_STOP_EPSILON      0.003
 
 #define JOGGING_SPEED         0.005
 #define ENEMY_SPEED           0.02
