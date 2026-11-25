@@ -3,9 +3,13 @@
 
 #include <stdint.h>
 
-// Diagnostico de travamento via Serial (115200 baud) e LED_BUILTIN (D13)
-// Mude para 0 para desativar completamente a instrumentacao
-#define DEBUG_FREEZE        1
+// Diagnostico de travamento frame-a-frame via Serial (115200 baud) e LED_BUILTIN (D13)
+// 0 = desligado (FPS cheio); 1 = log detalhado por etapa do loop
+#define DEBUG_FREEZE        0
+
+// Monitoramento leve de recuperacao de barramento I2C (zero overhead em operacao normal;
+// imprime no Serial 115200 baud somente se twiRecoverBus() for acionada)
+#define DEBUG_TWI_RECOVERY  1
 
 // GFX settings
 #define OPTIMIZE_SSD1306                // Optimizations for SSD1306 displays

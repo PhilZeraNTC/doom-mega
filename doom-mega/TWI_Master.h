@@ -16,6 +16,7 @@
   TWI Status/Control register definitions
 ****************************************************************************/
 constexpr uint16_t TWI_BUFFER_SIZE = 344; // Largest message size including address and control bytes
+constexpr uint16_t TWI_TIMEOUT_MS  = 20;  // Timeout de seguranca antes de acionar I2C Bus Recovery
 #define TWI_FREQ 400000UL
 #define TWI_ADDR ((uint8_t)((OLED_I2C_ADDR) << 1)) // 8-bit SLA+W address (0x78 for 0x3C)
 
@@ -28,6 +29,7 @@ unsigned char TWI_Get_State_Info(void);
 void TWI_Start_Transceiver_With_Data(uint8_t cmd, unsigned char *msg, uint16_t msgSize);
 void TWI_Start_Transceiver(void);
 unsigned char TWI_Get_Data_From_Transceiver(unsigned char *msg, unsigned char msgSize);
+uint16_t TWI_Get_Recovery_Count(void);
 
 /****************************************************************************
   Bit and byte definitions

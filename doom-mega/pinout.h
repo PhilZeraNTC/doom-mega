@@ -16,6 +16,8 @@
 //   SDA = D20 (PD1)
 //   SCL = D21 (PD0)
 // Endereco I2C de 7 bits (TWI_ADDR = OLED_I2C_ADDR << 1 = 0x78 por padrao)
+constexpr uint8_t PIN_TWI_SDA = 20;
+constexpr uint8_t PIN_TWI_SCL = 21;
 #ifndef OLED_I2C_ADDR
 #define OLED_I2C_ADDR 0x3C
 #endif

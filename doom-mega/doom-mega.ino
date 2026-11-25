@@ -69,12 +69,16 @@ static inline void dbgMark(char c) {
 #endif
 
 void setup(void) {
-#if DEBUG_FREEZE
+#if DEBUG_FREEZE || DEBUG_TWI_RECOVERY
   Serial.begin(115200);
+#endif
+#if DEBUG_FREEZE
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
   Serial.println(F("[BOOT] doom-mega start"));
   Serial.flush();
+#elif DEBUG_TWI_RECOVERY
+  Serial.println(F("[BOOT] doom-mega ready (TWI recovery monitor active)"));
 #endif
   setupDisplay();
   input_setup();
@@ -711,6 +715,7 @@ void loopIntro() {
 void loopGamePlay() {
   bool walkSoundToggle = false;
   bool death_triggered = false;
+  bool last_invert_screen = false;
   uint8_t gun_pos = 0;
   double rot_speed = 0;
   double old_dir_x = 0;
@@ -929,7 +934,10 @@ void loopGamePlay() {
     }
 
     dbgMark('D');
-    display.invertDisplay(invert_screen);
+    if (invert_screen != last_invert_screen) {
+      display.invertDisplay(invert_screen);
+      last_invert_screen = invert_screen;
+    }
     display.display();
 
 #if DEBUG_FREEZE

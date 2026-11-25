@@ -145,5 +145,32 @@ O radar 2D é alternado sem travar o gameplay pelo clique único do joystick dir
 - **Telas Dual-Color:** `GAME_OVER` e `VICTORY` exibem o título em destaque na faixa amarela (`y = 0..15`) e as estatísticas da partida (`KILLS`, `KEYS`, `TIME` em segundos + prompt `PRESS FIRE OR R-SW`) na faixa azul (`y = 16..63`), reiniciando diretamente para `GAME_PLAY` com `resetLevelState()`.
 - **Expansão de áudio em `PROGMEM` com prioridade (`sound.h`/`.cpp`):** adicionados 6 efeitos no formato *Inverse Frequency Sound* (`enemy_hit_snd`, `player_hurt_snd`, `fireball_snd`, `ui_click_snd`, `game_over_snd`, `victory_snd`), todos mantidos em Flash (`PROGMEM`) muito abaixo do limite de 64 KB. `playSound()` recebe nível de prioridade (`SND_PRIO_LOW` a `SND_PRIO_CRITICAL`), impedindo que passos ou batidas na parede interrompam efeitos críticos, e `hit_wall_snd` passou a tocar apenas em colisões do jogador.
 
+---
+
+## 8. Estudo de Caso Real de Depuração Embarcada: Deadlock TWI (`TWSTO` × `TWSTA`) e *I2C Bus Recovery*
+
+Durante os testes no Arduino Mega 2560 real, o jogo iniciava e operava normalmente por alguns segundos (~10 s) e então congelava com a última imagem travada no OLED.
+
+### 8.1. Diagnóstico Instrumentado no Hardware Real
+Para localizar o ponto exato sem adivinhação, foi adicionada uma instrumentação temporária (`DEBUG_FREEZE`, via UART0 a 115200 baud + toggle do `LED_BUILTIN` D13 por frame + timeout com dump de registradores TWI em `TWI_Master.cpp`). O travamento foi capturado deterministicamente no Serial Monitor:
+
+```text
+[TWI_HANG] TWSR=0xF8 TWCR=0x25 state=0xF8 lastISR=0x28 ptr=342/3 isrCnt=171015 SREG=0x82
+```
+
+**Decodificação dos registradores capturados:**
+- `SREG=0x82`: bit `I` (bit 7) em `1` — interrupções globais estavam habilitadas (descartando deadlock de `cli()`).
+- `lastISR=0x28` (`TWI_MTX_DATA_ACK`) e `ptr=342/3`: após o último byte do pacote anterior de 342 bytes, a ISR encerrou enviando `STOP` (`TWSTO=1`, `TWIE=0`). Imediatamente depois, iniciou-se uma transação curta de 3 bytes (`invertDisplay()`).
+- `TWSR=0xF8` (`TWI_NO_STATE`) e `TWCR=0x25` (`0b0010_0101` → `TWSTA=1`, `TWEN=1`, `TWIE=1`, `TWINT=0`): o controlador TWI ficou eternamente aguardando para emitir o novo `START`.
+
+### 8.2. Causa Raiz: Condição de Corrida `TWSTO` → `TWSTA`
+No driver original herdado do `doom-nano` (`AVR315`), `TWI_Transceiver_Busy()` verificava apenas `TWCR & (1 << TWIE)`. Assim que a ISR zerava `TWIE` e setava `TWSTO=1` para iniciar o `STOP` em hardware, a CPU saía imediatamente do loop de espera. Antes de o periférico concluir fisicamente o `STOP` (`TWSTO` voltar a `0`) e cumprir o tempo livre de barramento `t_BUF` ($\ge 1{,}3\,\mu\text{s}$ a 400 kHz), o pacote curto seguinte sobrescrevia `TWCR` com `TWSTA=1`, travando o estado interno do hardware TWI. Além disso, o bloco de erro da `ISR(TWI_vect)` escrevia `(0 << TWINT) | (0 << TWSTO)` em vez de `(1 << TWINT) | (1 << TWSTO)`, violando o procedimento de recuperação descrito no datasheet do ATmega2560 (Seção 24.7).
+
+### 8.3. Blindagem Aplicada em 3 Camadas (`TWI_Master.cpp` e `doom-mega.ino`)
+1. **Sincronização física do `STOP` e `t_BUF`:** `TWI_Transceiver_Busy()` passou a checar `(TWCR & ((1 << TWIE) | (1 << TWSTO)))`, aguardando o hardware concluir fisicamente o `STOP`, seguido de `delayMicroseconds(2)` antes de disparar o próximo `START`. Em paralelo, `loopGamePlay()` passou a invocar `display.invertDisplay()` apenas quando `invert_screen` muda de estado, eliminando transações I2C redundantes.
+2. **Tratamento de erros conforme datasheet na `ISR(TWI_vect)`:** todos os estados de falha (`TWI_BUS_ERROR = 0x00`, `TWI_MTX_ADR_NACK = 0x20`, `TWI_MTX_DATA_NACK = 0x30`, `TWI_ARB_LOST = 0x38` e `default`) agora escrevem `(1 << TWEN) | (0 << TWIE) | (1 << TWINT) | (1 << TWSTO)`, limpando `TWINT`, emitindo `STOP` e liberando o loop principal.
+3. **Tolerância a falhas com *I2C Bus Recovery* (`twiRecoverBus()`):** nenhuma espera em `TWI_Master.cpp` é infinita (`TWI_TIMEOUT_MS = 20 ms`). Caso um glitch físico na protoboard trave o barramento, o driver desabilita o TWI (`TWCR = 0`), gera até **9 pulsos de clock em `SCL` (D21)** enquanto `SDA` (D20) estiver em `LOW`, executa um `STOP` manual (`SDA` sobe com `SCL = HIGH`), reinicializa o TWI e aborta apenas a transação atual sem congelar o jogo — registrando o evento sob `#define DEBUG_TWI_RECOVERY 1` (zero overhead em operação normal).
+
+
 
 
