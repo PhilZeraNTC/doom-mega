@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+// Diagnostico de travamento via Serial (115200 baud) e LED_BUILTIN (D13)
+// Mude para 0 para desativar completamente a instrumentacao
+#define DEBUG_FREEZE        1
+
 // GFX settings
 #define OPTIMIZE_SSD1306                // Optimizations for SSD1306 displays
 

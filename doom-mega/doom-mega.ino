@@ -59,10 +59,30 @@ uint32_t game_start_ms = 0;
 uint16_t final_time_sec = 0;
 bool minimap_enabled = false;
 
+#if DEBUG_FREEZE
+static inline void dbgMark(char c) {
+  Serial.write(c);
+  Serial.flush();
+}
+#else
+#define dbgMark(c) ((void)0)
+#endif
+
 void setup(void) {
+#if DEBUG_FREEZE
+  Serial.begin(115200);
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
+  Serial.println(F("[BOOT] doom-mega start"));
+  Serial.flush();
+#endif
   setupDisplay();
   input_setup();
   sound_init();
+#if DEBUG_FREEZE
+  Serial.println(F("[BOOT] setup ok"));
+  Serial.flush();
+#endif
 }
 
 // Jump to another scene
@@ -698,6 +718,12 @@ void loopGamePlay() {
   double view_height = 0;
   double jogging = 0;
   uint8_t fade = GRADIENT_COUNT - 1;
+#if DEBUG_FREEZE
+  uint32_t dbg_frame = 0;
+  bool dbg_led = false;
+  Serial.println(F("\n[SCENE] GAME_PLAY"));
+  Serial.flush();
+#endif
 
   // Reset completo de entidades, bitmask de persistencia e estatisticas da partida
   resetLevelState();
@@ -712,7 +738,13 @@ void loopGamePlay() {
   lastFrameTime = millis();
 
   do {
+#if DEBUG_FREEZE
+    dbg_led = !dbg_led;
+    digitalWrite(LED_BUILTIN, dbg_led ? HIGH : LOW);
+#endif
+    dbgMark('F');
     fps();
+    dbgMark('I');
     input_update();
 
     // Limpa exclusivamente o viewport 3D azul (paginas 2..7 = 768 bytes), preservando o HUD amarelo (paginas 0..1)
@@ -857,9 +889,11 @@ void loopGamePlay() {
       }
     }
 
+    dbgMark('U');
     updateEntities(sto_level_1);
 
     // Raycast de paredes e saida preenche o Z-buffer de 16 bits do frame atual
+    dbgMark('R');
     renderMap(sto_level_1, view_height);
 
     // Aplica disparo com teste de linha de visao contra o Z-buffer recem-calculado
@@ -867,10 +901,13 @@ void loopGamePlay() {
       fire();
     }
 
+    dbgMark('E');
     renderEntities(view_height);
+    dbgMark('G');
     renderGun(gun_pos, jogging);
 
     // Radar 2D desenhado sobre o canto direito da faixa azul quando ativo
+    dbgMark('M');
     if (minimap_enabled && !exit_scene) {
       minimap_render(sto_level_1, player, entity, num_entities);
     }
@@ -881,6 +918,7 @@ void loopGamePlay() {
       fade--;
     }
 
+    dbgMark('H');
     hud_update_stats((uint8_t)getActualFps(), is_sprinting, minimap_enabled);
 
     if (flash_screen > 0) {
@@ -890,8 +928,23 @@ void loopGamePlay() {
       invert_screen = false;
     }
 
+    dbgMark('D');
     display.invertDisplay(invert_screen);
     display.display();
+
+#if DEBUG_FREEZE
+    dbg_frame++;
+    if ((dbg_frame % 15UL) == 0UL) {
+      Serial.print(F("\n[FRM "));
+      Serial.print(dbg_frame);
+      Serial.print(F(" ent="));
+      Serial.print(num_entities);
+      Serial.print(F(" snd="));
+      Serial.print(sound ? 1 : 0);
+      Serial.println(']');
+      Serial.flush();
+    }
+#endif
   } while (!exit_scene);
 }
 

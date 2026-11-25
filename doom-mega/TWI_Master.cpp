@@ -8,12 +8,70 @@
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include "constants.h"
 #include "TWI_Master.h"
+
+#if DEBUG_FREEZE
+#include <Arduino.h>
+#endif
 
 static unsigned char TWI_buf[TWI_BUFFER_SIZE];       // Transceiver buffer
 static volatile uint16_t TWI_msgSize;                // Number of bytes to be transmitted
 static volatile unsigned char TWI_state = TWI_NO_STATE; // State byte
 static volatile unsigned char lastTransOK;
+
+#if DEBUG_FREEZE
+static volatile uint16_t TWI_dbgBufPtr    = 0;
+static volatile uint8_t  TWI_dbgLastTwsr  = TWI_NO_STATE;
+static volatile uint32_t TWI_dbgIsrCount  = 0;
+
+static void twiPrintHexByte(uint8_t v)
+{
+  if (v < 16) Serial.print('0');
+  Serial.print(v, HEX);
+}
+#endif
+
+static void twiWaitReady(void)
+{
+#if DEBUG_FREEZE
+  uint32_t start_ms = millis();
+  uint32_t spins    = 0;
+  bool     reported = false;
+
+  while (TWI_Transceiver_Busy()) {
+    spins++;
+    if (!reported && (((millis() - start_ms) >= 50UL) || (spins >= 100000UL))) {
+      reported = true;
+      uint8_t twsr_val  = TWSR;
+      uint8_t twcr_val  = TWCR;
+      uint8_t state_val = TWI_state;
+      uint8_t sreg_val  = SREG;
+
+      Serial.print(F("\n[TWI_HANG] TWSR=0x"));
+      twiPrintHexByte(twsr_val);
+      Serial.print(F(" TWCR=0x"));
+      twiPrintHexByte(twcr_val);
+      Serial.print(F(" state=0x"));
+      twiPrintHexByte(state_val);
+      Serial.print(F(" lastISR=0x"));
+      twiPrintHexByte(TWI_dbgLastTwsr);
+      Serial.print(F(" ptr="));
+      Serial.print(TWI_dbgBufPtr);
+      Serial.print('/');
+      Serial.print(TWI_msgSize);
+      Serial.print(F(" isrCnt="));
+      Serial.print(TWI_dbgIsrCount);
+      Serial.print(F(" SREG=0x"));
+      twiPrintHexByte(sreg_val);
+      Serial.println();
+      Serial.flush();
+    }
+  }
+#else
+  while (TWI_Transceiver_Busy());
+#endif
+}
 
 /****************************************************************************
   Set up the TWI master to its initial standby state (400 kHz @ 16 MHz).
@@ -42,7 +100,7 @@ unsigned char TWI_Transceiver_Busy(void)
 ****************************************************************************/
 unsigned char TWI_Get_State_Info(void)
 {
-  while (TWI_Transceiver_Busy()); // Wait until TWI has completed the transmission
+  twiWaitReady(); // Wait until TWI has completed the transmission
   return TWI_state;
 }
 
@@ -51,7 +109,7 @@ unsigned char TWI_Get_State_Info(void)
 ****************************************************************************/
 void TWI_Start_Transceiver_With_Data(uint8_t cmd, unsigned char *msg, uint16_t msgSize)
 {
-  while (TWI_Transceiver_Busy()); // Wait until TWI is ready for next transmission
+  twiWaitReady(); // Wait until TWI is ready for next transmission
 
   if (msgSize > (TWI_BUFFER_SIZE - 2)) {
     msgSize = TWI_BUFFER_SIZE - 2;
@@ -78,7 +136,7 @@ void TWI_Start_Transceiver_With_Data(uint8_t cmd, unsigned char *msg, uint16_t m
 ****************************************************************************/
 void TWI_Start_Transceiver(void)
 {
-  while (TWI_Transceiver_Busy());
+  twiWaitReady();
   lastTransOK = 0;
   TWI_state   = TWI_NO_STATE;
   TWCR = (1 << TWEN) |
@@ -92,7 +150,7 @@ void TWI_Start_Transceiver(void)
 ****************************************************************************/
 unsigned char TWI_Get_Data_From_Transceiver(unsigned char *msg, unsigned char msgSize)
 {
-  while (TWI_Transceiver_Busy());
+  twiWaitReady();
 
   if (lastTransOK) {
     for (unsigned char i = 0; i < msgSize; i++) {
@@ -106,6 +164,12 @@ unsigned char TWI_Get_Data_From_Transceiver(unsigned char *msg, unsigned char ms
 ISR(TWI_vect)
 {
   static uint16_t TWI_bufPtr;
+
+#if DEBUG_FREEZE
+  TWI_dbgIsrCount++;
+  TWI_dbgLastTwsr = TWSR & 0xF8;
+  TWI_dbgBufPtr   = TWI_bufPtr;
+#endif
 
   switch (TWSR & 0xF8)
   {
